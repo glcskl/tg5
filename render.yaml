@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: tg5-schedule-bot
+    env: python
+    region: oregon
+    plan: free
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash start.sh
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_CHAT_IDS
+        sync: false
+      - key: TIMEZONE
+        value: Europe/Minsk
+      - key: REMIND_DAYS
+        value: "2,1"
+      - key: REMIND_AT
+        value: "10:00,22:00"
+      - key: REMIND_HOURS
+        value: "2"
+      - key: REMIND_WINDOW_MINUTES
+        value: "360"
+      - key: PYTHON_VERSION
+        value: 3.11.0

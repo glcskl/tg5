@@ -61,13 +61,16 @@ def human_delta(delta: timedelta) -> str:
     parts = []
     if days:
         parts.append(f"{days} {plural(days, 'день', 'дня', 'дней')}")
-    if hours:
+        if hours:
+            parts.append(f"{hours} {plural(hours, 'час', 'часа', 'часов')}")
+    elif hours:
         parts.append(f"{hours} {plural(hours, 'час', 'часа', 'часов')}")
-    if not days and not hours:
         if mins:
             parts.append(f"{mins} {plural(mins, 'минута', 'минуты', 'минут')}")
-        else:
-            return "меньше минуты"
+    elif mins:
+        parts.append(f"{mins} {plural(mins, 'минута', 'минуты', 'минут')}")
+    else:
+        return "меньше минуты"
     return " ".join(parts)
 
 
@@ -115,14 +118,23 @@ def parse_float_list(value: str) -> tuple[float, ...]:
     return tuple(dict.fromkeys(result))
 
 
+def parse_time_list(value: str) -> tuple[dt_time, ...]:
+    result = []
+    for part in re.split(r"[\s,;]+", value.strip()):
+        if part:
+            result.append(parse_hhmm(part))
+    return tuple(dict.fromkeys(result))
+
+
 @dataclass(frozen=True)
 class Config:
     token: str
     chat_ids: tuple[int, ...]
     tz: ZoneInfo
     remind_days: tuple[int, ...]
-    remind_at: dt_time
+    remind_times: tuple[dt_time, ...]
     remind_hours: tuple[float, ...]
+    remind_window_minutes: int
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -135,17 +147,30 @@ class Config:
         if any(day < 0 for day in days):
             raise SystemExit("REMIND_DAYS не может содержать отрицательные значения")
 
+        times = parse_time_list(os.getenv("REMIND_AT", "10:00,22:00"))
+        if not times:
+            raise SystemExit("REMIND_AT должен содержать хотя бы одно время")
+
         hours = parse_float_list(os.getenv("REMIND_HOURS", "2"))
         if any(hour <= 0 for hour in hours):
             raise SystemExit("REMIND_HOURS должен быть больше нуля")
+
+        raw_window = os.getenv("REMIND_WINDOW_MINUTES", "360").strip()
+        try:
+            window = int(raw_window)
+        except ValueError as exc:
+            raise SystemExit("REMIND_WINDOW_MINUTES должен быть целым числом минут") from exc
+        if window < 0:
+            raise SystemExit("REMIND_WINDOW_MINUTES не может быть отрицательным")
 
         return cls(
             token=os.getenv("BOT_TOKEN", "").strip(),
             chat_ids=parse_int_list(os.getenv("ADMIN_CHAT_IDS", "")),
             tz=tz,
             remind_days=days,
-            remind_at=parse_hhmm(os.getenv("REMIND_AT", "10:00")),
+            remind_times=times,
             remind_hours=hours,
+            remind_window_minutes=window,
         )
 
 
@@ -231,15 +256,16 @@ def reminder_goals(event: dict, config: Config) -> list[tuple[datetime, str]]:
     seen: set[str] = set()
 
     for days in config.remind_days:
-        due = datetime.combine(
-            start.date() - timedelta(days=days),
-            config.remind_at,
-            tzinfo=config.tz,
-        )
-        rule = f"d{days}"
-        if rule not in seen:
-            goals.append((due, rule))
-            seen.add(rule)
+        for at in config.remind_times:
+            due = datetime.combine(
+                start.date() - timedelta(days=days),
+                at,
+                tzinfo=config.tz,
+            )
+            rule = f"d{days}@{at:%H:%M}"
+            if rule not in seen:
+                goals.append((due, rule))
+                seen.add(rule)
 
     for hours in config.remind_hours:
         due = start - timedelta(hours=hours)
@@ -376,11 +402,17 @@ class Bot:
             except Exception as exc:
                 log(f"Не удалось отправить {chat_id}: {exc}")
 
-    def deliver_due(self) -> None:
+    def deliver_due(self, now: datetime | None = None) -> None:
         if not self.config.chat_ids:
             return
 
-        now = datetime.now(self.config.tz)
+        now = now or datetime.now(self.config.tz)
+        window = (
+            timedelta(minutes=self.config.remind_window_minutes)
+            if self.config.remind_window_minutes > 0
+            else None
+        )
+
         for event in self.events:
             start: datetime = event["_start"]
             if start <= now:
@@ -391,9 +423,18 @@ class Bot:
             if not due:
                 continue
 
-            stage = due[-1][1]
-            for chat_id in self.config.chat_ids:
-                for _, rule in due[:-1]:
+            fresh = [goal for goal in due if window is None or now - goal[0] <= window]
+            if not fresh:
+                for _, rule in due:
+                    for chat_id in self.config.chat_ids:
+                        self.state.mark(state_key(event, rule, chat_id))
+                continue
+
+            stage = fresh[-1][1]
+            for _, rule in due:
+                if rule == stage:
+                    continue
+                for chat_id in self.config.chat_ids:
                     self.state.mark(state_key(event, rule, chat_id))
 
             text = format_reminder(event, now)
@@ -464,6 +505,7 @@ class Bot:
             else "нет"
         )
         days = ", ".join(str(day) for day in self.config.remind_days) or "—"
+        times = ", ".join(f"{at:%H:%M}" for at in self.config.remind_times)
         hours = ", ".join(f"{hour:g}" for hour in self.config.remind_hours) or "—"
         admins = ", ".join(str(chat_id) for chat_id in self.config.chat_ids) or "не заданы"
         uptime = human_delta(now - self.started_at)
@@ -473,7 +515,7 @@ class Bot:
             f"Админы: {esc(admins)}\n"
             f"Мероприятий в расписании: {len(self.events)}\n"
             f"Ближайшее: {nearest}\n"
-            f"Напоминания: за {days} дн. в {self.config.remind_at:%H:%M}, "
+            f"Напоминания: за {days} дн. в {times}, "
             f"за {hours} ч.\n"
             f"Работаю: {uptime}"
         )
@@ -522,9 +564,10 @@ def dry_run(config: Config, events: list[dict], days: int) -> None:
     upcoming = [event for event in events if now < event["_start"] <= horizon]
 
     print(f"Сейчас: {now:%d.%m.%Y %H:%M} ({config.tz.key})")
+    times = ", ".join(f"{at:%H:%M}" for at in config.remind_times)
     print(
         f"Напоминания: за {', '.join(map(str, config.remind_days))} дн. "
-        f"в {config.remind_at:%H:%M}; за {', '.join(f'{h:g}' for h in config.remind_hours)} ч."
+        f"в {times}; за {', '.join(f'{h:g}' for h in config.remind_hours)} ч."
     )
     print(f"Мероприятий в ближайшие {days} дн.: {len(upcoming)}\n")
 

@@ -1,0 +1,30 @@
+name: Keep Alive
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    env:
+      BOT_URL: ${{ vars.BOT_URL }}
+    steps:
+      - name: Ping health endpoint
+        run: |
+          if [ -z "$BOT_URL" ]; then
+            echo "::warning::Переменная BOT_URL не задана — keep-alive пропущен"
+            exit 0
+          fi
+
+          for attempt in 1 2 3; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 "$BOT_URL/health")
+            echo "Попытка $attempt: HTTP $code"
+            if [ "$code" = "200" ]; then
+              exit 0
+            fi
+            sleep $((attempt * 30))
+          done
+
+          echo "::warning::Сервис не ответил 200 после трёх попыток"

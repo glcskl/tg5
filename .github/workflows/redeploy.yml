@@ -1,0 +1,28 @@
+name: Redeploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  redeploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render deploy hook
+        env:
+          DEPLOY_HOOK_URL: ${{ secrets.DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$DEPLOY_HOOK_URL" ]; then
+            echo "::error::Добавьте секрет DEPLOY_HOOK_URL: Render → Settings → Deploy Hook."
+            exit 1
+          fi
+
+          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 -X POST "$DEPLOY_HOOK_URL")
+          echo "Deploy hook HTTP $code"
+
+          if [ "$code" = "409" ]; then
+            echo "::warning::Render вернул 409 — сервис, возможно, приостановлен. Возобновите его в панели Render."
+            exit 0
+          fi
+          if [ "$code" != "201" ] && [ "$code" != "200" ]; then
+            exit 1
+          fi

@@ -1,0 +1,51 @@
+name: Health log
+
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: health-log
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      BOT_HEALTH_URL: ${{ vars.BOT_URL }}/health
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check configuration
+        run: |
+          if [ -z "${{ vars.BOT_URL }}" ]; then
+            echo "::error::Переменная BOT_URL не задана. Добавьте её в Settings → Secrets and variables → Actions → Variables."
+            exit 1
+          fi
+
+      - name: Ping bot
+        id: ping
+        continue-on-error: true
+        run: python3 health_check.py
+
+      - name: Commit health.log
+        run: |
+          git config user.name "glcskl"
+          git config user.email "188385208+glcskl@users.noreply.github.com"
+          git add health.log
+          if git diff --cached --quiet; then
+            echo "health.log не изменился"
+            exit 0
+          fi
+          git commit -q -m "chore: health log $(date -u +%F)"
+          git push
+
+      - name: Fail when the bot is down
+        if: steps.ping.outcome != 'success'
+        run: |
+          echo "::error::Health check failed, last line: $(tail -n 1 health.log)"
+          exit 1

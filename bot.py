@@ -23,6 +23,7 @@ BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
 SCHEDULE_PATH = BASE_DIR / "schedule.json"
 STATE_PATH = BASE_DIR / "state.json"
+SUBSCRIBERS_PATH = BASE_DIR / "subscribers.json"
 TICK_SECONDS = 20
 EVENT_RETENTION_DAYS = 120
 
@@ -250,6 +251,58 @@ class SentState:
         temp.replace(self.path)
 
 
+class Subscribers:
+    """Все, кто хоть раз написал боту: нужны для тестовых рассылок."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.lock = threading.Lock()
+        self.items: dict[str, dict] = {}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    self.items = data
+            except (OSError, ValueError):
+                log("Не удалось прочитать subscribers.json, начинаю с чистого листа")
+
+    def add(self, chat: dict) -> None:
+        chat_id = chat.get("id")
+        if chat_id is None:
+            return
+        name = " ".join(
+            part for part in (chat.get("first_name"), chat.get("last_name")) if part
+        )
+        username = chat.get("username") or ""
+        with self.lock:
+            key = str(chat_id)
+            existing = self.items.get(key)
+            if existing and existing.get("name") == name and existing.get("username") == username:
+                return
+            self.items[key] = {
+                "name": name,
+                "username": username,
+                "since": (
+                    existing["since"]
+                    if existing
+                    else datetime.now().astimezone().isoformat(timespec="seconds")
+                ),
+            }
+            self._save()
+
+    def ids(self) -> list[int]:
+        with self.lock:
+            return sorted(int(key) for key in self.items)
+
+    def _save(self) -> None:
+        temp = self.path.with_suffix(".tmp")
+        temp.write_text(
+            json.dumps(self.items, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temp.replace(self.path)
+
+
 def reminder_goals(event: dict, config: Config) -> list[tuple[datetime, str]]:
     start: datetime = event["_start"]
     goals: list[tuple[datetime, str]] = []
@@ -384,10 +437,17 @@ class Telegram:
 
 
 class Bot:
-    def __init__(self, config: Config, events: list[dict], state: SentState) -> None:
+    def __init__(
+        self,
+        config: Config,
+        events: list[dict],
+        state: SentState,
+        subscribers: "Subscribers | None" = None,
+    ) -> None:
         self.config = config
         self.events = events
         self.state = state
+        self.subscribers = subscribers
         self.telegram = Telegram(config.token)
         self.started_at = datetime.now(config.tz)
         self.stop = threading.Event()
@@ -458,11 +518,56 @@ class Bot:
                 log(f"Ошибка планировщика: {exc}")
             self.stop.wait(TICK_SECONDS)
 
+    def broadcast_next(self, now: datetime | None = None) -> dict:
+        now = now or datetime.now(self.config.tz)
+        upcoming = upcoming_events(self.events, now)
+        if not upcoming:
+            return {
+                "ok": False,
+                "reason": "Нет предстоящих мероприятий",
+                "targets": [],
+                "sent": [],
+                "failed": [],
+            }
+
+        event = upcoming[0]
+        text = "Тестовый прогон напоминания.\n\n" + format_reminder(event, now)
+        targets = sorted(
+            set(self.config.chat_ids)
+            | set(self.subscribers.ids() if self.subscribers else [])
+        )
+        sent: list[int] = []
+        failed: list[int] = []
+        for chat_id in targets:
+            try:
+                self.telegram.send(chat_id, text)
+            except Exception as exc:
+                log(f"Тестовая рассылка: не отправлено {chat_id}: {exc}")
+                failed.append(chat_id)
+                continue
+            sent.append(chat_id)
+
+        log(
+            f"Тестовая рассылка по {event['id']}: "
+            f"отправлено {len(sent)}, ошибок {len(failed)}"
+        )
+        return {
+            "ok": True,
+            "event": event["id"],
+            "targets": targets,
+            "sent": sent,
+            "failed": failed,
+        }
+
     def handle_message(self, message: dict) -> None:
         text = (message.get("text") or "").strip()
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
-        if not text.startswith("/") or chat_id is None:
+        if chat_id is None:
+            return
+        if self.subscribers is not None:
+            self.subscribers.add(chat)
+        if not text.startswith("/"):
             return
 
         command = text.split()[0].split("@")[0].lower()

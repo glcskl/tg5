@@ -25,7 +25,8 @@ if not config.token:
 events = core.load_events(config)
 state = core.SentState(core.STATE_PATH)
 state.prune()
-service = core.Bot(config, events, state)
+subscribers = core.Subscribers(core.SUBSCRIBERS_PATH)
+service = core.Bot(config, events, state, subscribers)
 
 app = Flask(__name__)
 
@@ -99,6 +100,7 @@ def health():
         "events": len(events),
         "next": upcoming[0]["id"] if upcoming else None,
         "admins": len(config.chat_ids),
+        "subscribers": len(subscribers.ids()),
     }
 
 
@@ -115,6 +117,13 @@ def telegram_webhook(token: str):
         except Exception as exc:
             core.log(f"Ошибка обработки update: {exc}")
     return "", 200
+
+
+@app.post("/admin/broadcast/<token>")
+def admin_broadcast(token: str):
+    if not secrets.compare_digest(token, config.token):
+        abort(403)
+    return service.broadcast_next()
 
 
 if __name__ == "__main__":

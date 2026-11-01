@@ -154,3 +154,42 @@ def test_message_is_html_escaped():
 def test_human_delta():
     assert bot.human_delta(timedelta(days=2)) == "2 дня"
     assert bot.human_delta(timedelta(hours=1, minutes=30)) == "1 час 30 минут"
+
+
+def test_start_records_subscriber(tmp_path):
+    subscribers = bot.Subscribers(tmp_path / "subscribers.json")
+    service, telegram, _ = make_bot(tmp_path, [make_event("2026-11-02")], make_config())
+    service.subscribers = subscribers
+
+    service.handle_message(
+        {"chat": {"id": 42, "first_name": "Глеб", "username": "glcskl"}, "text": "/start"}
+    )
+
+    assert subscribers.ids() == [42]
+    assert len(telegram.sent) == 1
+
+
+def test_subscribers_persist_without_duplicates(tmp_path):
+    path = tmp_path / "subscribers.json"
+    first = bot.Subscribers(path)
+    first.add({"id": 7, "first_name": "Анна"})
+    first.add({"id": 7, "first_name": "Анна"})
+
+    second = bot.Subscribers(path)
+    assert second.ids() == [7]
+
+
+def test_broadcast_reaches_admins_and_subscribers(tmp_path):
+    subscribers = bot.Subscribers(tmp_path / "subscribers.json")
+    subscribers.add({"id": 7, "first_name": "Анна"})
+    subscribers.add({"id": 1, "first_name": "Глеб", "username": "glcskl"})
+    service, telegram, _ = make_bot(tmp_path, [make_event("2026-11-02")], make_config())
+    service.subscribers = subscribers
+
+    result = service.broadcast_next(now=datetime(2026, 11, 1, 20, 0, tzinfo=TZ))
+
+    assert result["event"] == "2026-11-02"
+    assert result["targets"] == [1, 2, 7]
+    assert result["sent"] == [1, 2, 7]
+    assert len(telegram.sent) == 3
+    assert all("Тестовый прогон" in text for _, text in telegram.sent)

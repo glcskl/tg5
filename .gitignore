@@ -1,6 +1,8 @@
 .env
 state.json
 state.tmp
+subscribers.json
+subscribers.tmp
 bot.log
 schedule.imported.json
 __pycache__/

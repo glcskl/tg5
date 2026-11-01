@@ -1,219 +1,201 @@
-# Напоминания о мероприятиях ВГТУ
+# tg5 — VSTU events reminder bot
 
-Telegram-бот `@eventsstartupspacebot` присылает админам напоминания о занятиях программы ВГТУ:
+A Telegram bot that reminds the two administrators of the VSTU StartUp Space program about upcoming events, so a session is not missed in the middle of a busy week. The schedule lives in a JSON file, the bot sends the date, weekday, time, place, speakers and details in advance, and keeps track of what has already been sent.
 
-- за 2 дня — в 10:00 и 22:00;
-- за 1 день — в 10:00 и 22:00;
-- за 2 часа до начала.
+## Features
 
-В сообщении: название, дата, день недели, время, место, тезисы и спикеры.
+- Reminders two days and one day before an event, twice a day at 10:00 and 22:00, plus two hours before the start
+- Message contains the title, date, weekday, time, place, speakers and key points
+- Schedule kept as structured JSON instead of a static document
+- Import of a new `.docx` program file, including splitting date ranges into separate events
+- Deduplication through `state.json`, so a restart does not repeat what was already delivered
+- Freshness window that suppresses reminders that are hours overdue after a restart
+- Two run modes: long polling for local work, webhook for hosting
+- Keep-alive mechanism that keeps the free hosting tier awake
+- Subscriber tracking and a test broadcast endpoint for checking delivery end to end
 
-## Как устроено
+## Tech stack
 
-| Часть | Назначение |
+| Layer | Technology |
 | --- | --- |
-| `bot.py` | Ядро: расписание, тексты, расчёт и отправка напоминаний, команды |
-| `web_app.py` | Flask-приложение для Render: Telegram webhook, планировщик, `/health` |
-| `render.yaml` | Описание сервиса Render: сборка, запуск, переменные |
-| `start.sh` | Запуск gunicorn с одним worker, чтобы напоминания не дублировались |
-| `.github/workflows/` | Keep-alive, health-лог, ручной redeploy и тесты |
+| Language | Python 3.11 |
+| Core | Python standard library, `zoneinfo` |
+| Web layer | Flask |
+| WSGI server | Gunicorn |
+| Configuration | `.env` file and environment variables |
+| HTTP client | requests |
+| Tests | pytest |
+| Automation | GitHub Actions |
+| Hosting | Render, free tier |
 
-Локально бот работает через long polling (`python3 bot.py`). На Render — через webhook, по той же схеме, что tg1–tg3.
+## Getting started
 
-## Быстрый запуск локально
+### Requirements
 
-Нужен Python 3.10 или новее. Для локального `bot.py` внешние библиотеки не требуются.
+- Python 3.11 or newer
+- A bot token from [@BotFather](https://t.me/BotFather)
 
-1. Скопируйте настройки и вставьте токен от [@BotFather](https://t.me/BotFather):
+### Environment variables
 
-   ```bash
-   cp .env.example .env
-   ```
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `BOT_TOKEN` | yes | — | Token issued by BotFather |
+| `ADMIN_CHAT_IDS` | yes | — | Comma-separated recipients; a group id also works |
+| `TIMEZONE` | no | `Europe/Minsk` | Time zone of the schedule |
+| `REMIND_DAYS` | no | `2,1` | Days before the event for the daily reminders |
+| `REMIND_AT` | no | `10:00,22:00` | Times of day for those reminders |
+| `REMIND_HOURS` | no | `2` | Hours before the start for the last reminder |
+| `REMIND_WINDOW_MINUTES` | no | `360` | Reminders older than this window are skipped |
+| `BOT_URL` | webhook mode | — | Public HTTPS URL of the deployed instance |
+| `RENDER_EXTERNAL_URL` | no | — | Injected by Render automatically |
 
-2. Отправьте боту `/start` и `/id`, затем добавьте оба id в `.env`:
+Create a `.env` file in the project root:
 
-   ```env
-   ADMIN_CHAT_IDS=111111111,222222222
-   ```
+```
+BOT_TOKEN=123456:ABCDEF...
+ADMIN_CHAT_IDS=111111111,222222222
+```
 
-3. Запустите:
-
-   ```bash
-   python3 bot.py
-   ```
-
-4. Проверьте доставку командой `/test` в боте.
-
-Проверить план напоминаний без запуска и без токена:
+### Installation
 
 ```bash
-python3 bot.py --dry-run --days 60
+git clone https://github.com/glcskl/tg5.git
+cd tg5
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-## Деплой на Render
+### Running
 
-Код уже лежит в [github.com/glcskl/tg5](https://github.com/glcskl/tg5). Дальше нужен аккаунт Render.
+Local development with long polling:
 
-### 1. Создать сервис
-
-1. В Render нажмите **New → Blueprint**.
-2. Подключите репозиторий `glcskl/tg5` и нажмите **Apply**.
-3. Render прочитает `render.yaml` и спросит две переменные:
-   - `BOT_TOKEN` — токен от @BotFather;
-   - `ADMIN_CHAT_IDS` — id админов через запятую. Если пока нет, оставьте пустым и добавьте позже.
-
-Render создаст бесплатный web-сервис `tg5-schedule-bot`, соберёт его и запустит.
-
-### 2. Записать адрес сервиса
-
-После первого деплоя Render покажет адрес вида:
-
-```
-https://tg5-schedule-bot.onrender.com
+```bash
+python bot.py
 ```
 
-Откройте в GitHub **Settings → Secrets and variables → Actions → Variables → New repository variable** и создайте переменную:
+Inspect the reminder plan without a token or a running bot:
 
-| Имя | Значение |
-| --- | --- |
-| `BOT_URL` | адрес сервиса без слэша в конце |
+```bash
+python bot.py --dry-run --days 60
+```
 
-Она включает два workflow: `Keep Alive` (пинг каждые 5 минут) и `Health log` (ежедневная проверка).
+Webhook mode, which is what the hosting platform uses:
 
-Render сам передаёт приложению `RENDER_EXTERNAL_URL`, поэтому webhook регистрируется автоматически при старте. Отдельно ничего настраивать не нужно.
+```bash
+python setup_webhook.py
+bash start.sh
+```
 
-### 3. Добавить админов
+`start.sh` runs Gunicorn with a single worker, so the scheduler is not duplicated across processes.
 
-1. Оба админа открывают бота в Telegram, нажимают **Start** и отправляют `/id`.
-2. Полученные числа добавьте в переменную `ADMIN_CHAT_IDS` в Render (Environment).
-3. Сохраните — Render перезапустит сервис.
-4. Проверьте: откройте `https://<адрес>/health` и отправьте боту `/test`.
+## Project structure
 
-Telegram не разрешает писать человеку, который ни разу не открывал бота, поэтому без шага 1 сообщения не дойдут.
+```
+bot.py             core logic and long-polling entry point
+web_app.py         Flask application serving the Telegram webhook
+start.sh           Gunicorn command used by the hosting platform
+setup_webhook.py   registers, inspects and removes the webhook
+keep_alive.py      keep-alive pinger for the free hosting tier
+health_check.py    pings /health and appends the result to health.log
+import_docx.py     imports a .docx program file into schedule.json format
+tests/             pytest suite for the bot, the schedule and the health probe
+schedule.json      event schedule
+render.yaml        Render service blueprint
+Procfile           process definition for the hosting platform
+```
 
-### Если нужен ручной redeploy
+## Schedule
 
-В Render откройте **Settings → Deploy Hook**, создайте ссылку и добавьте её в GitHub как секрет `DEPLOY_HOOK_URL`. После этого вкладка **Actions → Redeploy** запускает перезапуск вручную.
+`schedule.json` is the single source of truth. It currently holds 10 events from 02.11 to 02.12.2026. The final event on 02.12.2026 comes from a note in the source document, and its 18:00 start time is an assumption.
 
-### Важно
+The following rows from the source document are intentionally excluded:
 
-- Не запускайте `python3 bot.py` с тем же токеном, пока Render работает через webhook: Telegram разрешает только один способ доставки. Для возврата к polling удалите webhook:
+- 05.10 to 30.10, marked in red as already conducted;
+- 15.12 and 18.12, which the notes say should not take place.
 
-  ```bash
-  python3 setup_webhook.py delete
-  ```
-
-- Проверить webhook:
-
-  ```bash
-  python3 setup_webhook.py info
-  ```
-
-- Бесплатный Render засыпает через 15 минут без запросов. `Keep Alive` будит сервис каждые 5 минут, а внутри приложения работает дополнительный self-ping каждые 8 минут.
-- `state.json` на Render хранится только до перезапуска. Чтобы после перезапуска не прилетели старые напоминания, включено окно `REMIND_WINDOW_MINUTES`: напоминание старше 6 часов пропускается.
-
-## Настройки
-
-| Переменная | По умолчанию | Значение |
-| --- | --- | --- |
-| `BOT_TOKEN` | — | Токен от @BotFather |
-| `ADMIN_CHAT_IDS` | — | Получатели через запятую; можно указать и группу |
-| `TIMEZONE` | `Europe/Minsk` | Часовой пояс расписания |
-| `REMIND_DAYS` | `2,1` | За сколько дней напоминать |
-| `REMIND_AT` | `10:00,22:00` | Во сколько отправлять напоминания «за N дней» |
-| `REMIND_HOURS` | `2` | За сколько часов напоминать |
-| `REMIND_WINDOW_MINUTES` | `360` | Напоминание старше этого окна не отправляется |
-| `BOT_URL` | — | Публичный адрес; на Render подставляется автоматически |
-
-Например, чтобы добавить напоминание утром в день мероприятия: `REMIND_DAYS=2,1,0`.
-
-## Команды бота
-
-| Команда | Что делает |
-| --- | --- |
-| `/next` | Ближайшее мероприятие |
-| `/schedule` | Все предстоящие мероприятия |
-| `/test` | Тестовое напоминание |
-| `/status` | Часовой пояс, админы, ближайшее мероприятие |
-| `/id` | Ваш chat_id для настройки |
-| `/help` | Справка |
-
-## Расписание
-
-Файл `schedule.json` — основной источник данных. Сейчас в нём:
-
-- 9 занятий с 02.11 по 26.11.2026;
-- финал 02.12.2026 — взят из примечания к документу, время 18:00 указано предположительно.
-
-Не включены:
-
-- строки с 05.10 по 30.10 — в документе выделены красным как уже проведённые;
-- 15.12 и 18.12 — в примечании указано, что проводить их не нужно.
-
-### Изменить мероприятие вручную
-
-Откройте `schedule.json` и измените нужное поле:
+Each event uses the following fields:
 
 ```json
 {
   "id": "2026-11-09",
   "date": "2026-11-09",
   "time": "18:00",
-  "title": "Инвест-симуляция",
-  "place": "ВГТУ",
-  "speakers": ["Мацуганова М.Д.", "Токарь Г.М."],
-  "subtitle": "Короткое пояснение",
-  "details": "Тезисы занятия",
-  "note": "Дополнительная пометка"
+  "title": "Investment simulation",
+  "place": "VSTU",
+  "speakers": ["Matsuganova M.D.", "Tokar G.M."],
+  "subtitle": "Short explanation",
+  "details": "Key points of the session",
+  "note": "Additional remark"
 }
 ```
 
-Обязательные поля: `id`, `date`, `time`, `title`. Поле `id` должно быть уникальным. После правки закоммитьте изменения — Render пересоберёт сервис автоматически.
+`id`, `date`, `time` and `title` are required, and `id` must be unique.
 
-### Пересобрать из нового .docx
+To rebuild the schedule from a new program file:
 
 ```bash
-python3 import_docx.py "Программа мероприятий.docx" --year 2026 --out schedule.imported.json
+python import_docx.py "Program.docx" --year 2026 --out schedule.imported.json
 ```
 
-Скрипт пропустит красные строки и даты `15.12,18.12`, а диапазоны вида `02.11 – 04.11` разобьёт на отдельные мероприятия. Результат сохранится в `schedule.imported.json` — сравните его с `schedule.json` и перенесите нужные изменения вручную, чтобы не потерять финал 02.12.
+The importer skips the red rows and the excluded dates, and splits ranges such as `02.11 – 04.11` into separate events. The result is written to `schedule.imported.json`; compare it with `schedule.json` and carry the changes over manually.
 
-## GitHub Actions
+## Commands
 
-| Workflow | Когда запускается | Что делает |
+| Command | Purpose |
+| --- | --- |
+| `/next` | Nearest upcoming event |
+| `/schedule` | All upcoming events |
+| `/test` | Sends a test reminder to the caller |
+| `/status` | Time zone, recipients, next event, uptime |
+| `/id` | Returns the caller's chat id |
+| `/help` | Command reference |
+
+## HTTP endpoints
+
+| Method | Path | Purpose |
 | --- | --- | --- |
-| `Keep Alive` | каждые 5 минут | пингует `/health`, чтобы Render не засыпал |
-| `Health log` | ежедневно | проверяет `/health`, дописывает строку в `health.log` и коммитит её |
-| `Redeploy` | вручную | дергает Render Deploy Hook |
-| `Tests` | push и pull request | запускает pytest |
+| `GET` | `/` | Liveness text response |
+| `GET` | `/health` | JSON status: time, event count, next event, admin and subscriber counts |
+| `POST` | `/webhook/<token>` | Telegram update receiver; rejects a wrong token with 403 |
+| `POST` | `/admin/broadcast/<token>` | Sends the next event reminder to every admin and subscriber |
 
-Cron в GitHub Actions может запаздывать на несколько минут — это нормально. Ежедневный коммит `health.log` ещё и не даёт GitHub отключить расписания из-за неактивности.
+## Deployment
 
-## Тесты
+`render.yaml` lets Render provision the web service straight from the blueprint.
+
+1. In Render choose **New → Blueprint** and connect `glcskl/tg5`.
+2. Fill in `BOT_TOKEN` and, if known already, `ADMIN_CHAT_IDS`.
+3. After the first deploy, copy the service URL and add it to GitHub under **Settings → Secrets and variables → Actions → Variables** as `BOT_URL`.
+
+Render passes `RENDER_EXTERNAL_URL` to the application, so the webhook is registered automatically on start.
+
+Routine maintenance is handled by GitHub Actions:
+
+| Workflow | Trigger | Purpose |
+| --- | --- | --- |
+| `Keep Alive` | every 5 minutes | pings the service so the free tier does not sleep |
+| `Health log` | daily | checks `/health`, appends a line to `health.log` and commits it |
+| `Redeploy` | manual | forces a redeploy through a Render deploy hook |
+| `Tests` | push, pull request | runs the pytest suite |
+
+For the manual redeploy, create a deploy hook in Render and store it as the `DEPLOY_HOOK_URL` secret.
+
+## Tests and health log
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
 pip install -r requirements.txt pytest
 python -m pytest -q
+python health_check.py
 ```
 
-## Файлы
+The suite covers reminder timing, delivery deduplication, restart behaviour, HTML escaping, subscriber tracking and the broadcast endpoint.
 
-| Файл | Назначение |
-| --- | --- |
-| `bot.py` | Ядро бота и запуск через long polling |
-| `web_app.py` | Flask-webhook для Render |
-| `schedule.json` | Расписание мероприятий |
-| `import_docx.py` | Импорт расписания из `.docx` |
-| `render.yaml` | Сервис Render |
-| `start.sh`, `Procfile` | Команда запуска |
-| `setup_webhook.py` | Установка, проверка и удаление webhook |
-| `keep_alive.py`, `health_check.py` | Пинг сервиса и health-лог |
-| `tests/` | Тесты |
-| `.env` | Локальные настройки (не публикуется) |
-| `state.json` | Отправленные напоминания (создаётся автоматически) |
+`health.log` is append-only: `<UTC time>\t<HTTP code>\t<latency>\t<up|down>`.
 
-## Безопасность
+## Notes
 
-`.env` и `state.json` исключены из Git. Токен храните только в `.env` и в переменных Render. Если токен попал в чужой доступ, перевыпустите его в @BotFather: старый сразу перестанет работать.
+- Telegram allows only one delivery method per bot. Do not run `python bot.py` with the same token while the hosted instance uses the webhook; remove the webhook first with `python setup_webhook.py delete`.
+- The free hosting tier sleeps after 15 minutes without requests. The keep-alive workflow pings the service every 5 minutes, and the application also pings itself every 8 minutes.
+- `state.json` and `subscribers.json` live on the instance and survive only until a restart. Recipients configured in `ADMIN_CHAT_IDS` are unaffected, and the freshness window prevents stale reminders from being sent after a restart.
+- This project is personal and is not affiliated with the university. It is maintained on a best-effort basis.

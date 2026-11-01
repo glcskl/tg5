@@ -1,0 +1,8 @@
+.env
+state.json
+state.tmp
+bot.log
+schedule.imported.json
+__pycache__/
+*.pyc
+.DS_Store
